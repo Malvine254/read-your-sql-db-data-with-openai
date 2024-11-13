@@ -10,13 +10,29 @@ body {
 }
 
 .container {
-    width: 1000px;
+    width: 90%; /* Set a responsive base width */
+    max-width: 1000px; /* Limit the width for smaller screens */
     height: 80vh;
     background-color: white;
     border-radius: 10px;
     box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
     display: flex;
     flex-direction: column;
+    margin: 0 auto; /* Center the container */
+    padding: 20px;
+}
+
+/* Increase width on larger screens */
+@media (min-width: 1200px) {
+    .container {
+        max-width: 1900px; /* Larger width on bigger screens */
+    }
+}
+
+@media (min-width: 1400px) {
+    .container {
+        max-width: 1400px; /* Even larger width on very large screens */
+    }
 }
 
 .header {
@@ -34,7 +50,7 @@ body {
     color: #333;
 }
 
-.header .options button {
+.header .optionsbutton {
     background-color: transparent;
     border: none;
     color: #0078d4;
@@ -115,5 +131,3 @@ body {
 .input-area button:hover {
     background-color: #005a9e;
 }
-
-

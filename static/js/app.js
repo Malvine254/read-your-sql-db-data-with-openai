@@ -49,12 +49,24 @@ $(document).ready(function() {
                 $('#typing-indicator').fadeOut(100, function() {
                     $(this).remove();
                 });
+                
 
                 // Display the summary message from the AI response
                 if (data.summary) {
+                    function checkIfEmpty (){
+                        if(data.chart_image ===""){
+                            return '';
+                        }else{
+                            return  `<img class="img-fluid" src="data:image/png;base64,${data.chart_image}"></img>`
+                        }
+                    }
                     const summaryMessage = `
                         <div class="message system">
-                            <p><strong style="color: red;">SQL Statement: ${data.sql_statement}<br></strong> ${data.summary}</p>
+                            <p> ${data.summary}
+                           
+                            ${checkIfEmpty ()}
+                            
+                            </p>
                             <small>AI-generated summary</small>
                         </div>
                     `;

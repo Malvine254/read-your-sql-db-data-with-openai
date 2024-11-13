@@ -7,9 +7,13 @@ from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langchain.agents import AgentType
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session
 import logging
 import re
+from datetime import datetime
+import matplotlib.pyplot as plt
+from io import BytesIO
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,8 +26,8 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_CHAT_MODEL = os.getenv('OPENAI_CHAT_MODEL', 'gpt-4-model')
 
 SQL_SERVER = os.getenv('SQL_SERVER', 'readtablewithopenai.database.windows.net')
-SQL_DB = os.getenv('SQL_DB', 'sql_db')
-SQL_USERNAME = os.getenv('SQL_USERNAME', 'sql_db')
+SQL_DB = os.getenv('SQL_DB')
+SQL_USERNAME = os.getenv('SQL_USERNAME')
 SQL_PWD = os.getenv('SQL_PWD')
 
 # SQLAlchemy setup
@@ -40,6 +44,7 @@ metadata = MetaData()
 metadata.reflect(bind=db_engine)
 user_tables = [table for table in metadata.tables if not table.lower().startswith("sys")]
 
+
 # Initialize AzureChatOpenAI instance
 llm = AzureChatOpenAI(
     api_key=OPENAI_API_KEY,
@@ -54,17 +59,16 @@ llm = AzureChatOpenAI(
 db = SQLDatabase(db_engine)
 sql_toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
-# Conversation prompt setup
-final_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful AI assistant, an expert in querying SQL Databases, particularly in providing information about Patients, Doctors, and Prescriptions. Use the following database schema to find answers to users' questions effectively.Database Schema Summary Appointments (AppointmentID, PatientID, DoctorID, AppointmentDate, Reason): Stores appointment details, linking patients to doctors with appointment dates and reasons. Doctors (DoctorID, FirstName, LastName, Specialty, Phone, Email): Contains information about doctors, including their specialties and contact details. Patients (PatientID, FirstName, LastName, DateOfBirth, Gender, Phone, Email, Address, DoctorID): Records patient details, including their assigned doctor and personal information like contact details and address. Prescriptions (PrescriptionID, AppointmentID, Medication, Dosage, Duration): Tracks medications prescribed during appointments, with dosage and duration information. vw_pat_doc (Patientid, firstname, lastname, dateofbirth, gender, address, doc_firstname, doc_lastname, specialty, phone): A view that combines patient and doctor information for easy access to patient-doctor relationships."),
-    ("user", "{question}\n ai: "),
-])
+# Set up Flask and session
+app = Flask(__name__)
+app.secret_key = os.urandom(24)  # Secure session with a random key
 
 # Create SQL DB Agent
 sqldb_agent = create_sql_agent(
     llm=llm,
     toolkit=sql_toolkit,
     agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    handle_parsing_errors=True,
     verbose=True
 )
 
@@ -82,47 +86,61 @@ def format_response_to_html(response_text):
     """
     Formats the AI response text into HTML with basic support for bold, italic, 
     lists (ordered and unordered), and URLs converted into clickable links.
-    Uses <br> for new lines instead of <p>.
     """
-    # Handling bold text: **bold** becomes <b>bold</b>
     formatted_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', response_text)
-
-    # Handling italic text: *italic* becomes <i>italic</i>
     formatted_text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', formatted_text)
-
-    # Convert Markdown links to HTML links: [Text](URL) -> <a href="URL" target="_blank">Text</a>
-    markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'  # Markdown pattern for [Text](URL)
+    markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
     formatted_text = re.sub(markdown_link_pattern, r'<a href="\2" target="_blank">\1</a>', formatted_text)
-
-    # Replace newline characters with <br> for line breaks
     formatted_text = formatted_text.replace('\n', '<br>')
-
-    # Convert unordered and ordered lists
-    formatted_text = re.sub(r'(?<=:)\s*-\s*(.*?)(<br>|$)', r'<li>\1</li>', formatted_text)  # Unordered lists (-)
-    formatted_text = re.sub(r'(?<=:)\s*•\s*(.*?)(<br>|$)', r'<li>\1</li>', formatted_text)  # Unordered lists (•)
-    formatted_text = re.sub(r'(?<=:)\s*\d+\.\s*(.*?)(<br>|$)', r'<li>\1</li>', formatted_text)  # Ordered lists (1.)
-
-    # Wrap lists with <ul> or <ol> tags
+    formatted_text = re.sub(r'(?<=:)\s*-\s*(.*?)(<br>|$)', r'<li>\1</li>', formatted_text)
+    formatted_text = re.sub(r'(?<=:)\s*•\s*(.*?)(<br>|$)', r'<li>\1</li>', formatted_text)
+    formatted_text = re.sub(r'(?<=:)\s*\d+\.\s*(.*?)(<br>|$)', r'<li>\1</li>', formatted_text)
     formatted_text = re.sub(r'(<li>.*?</li>)', r'<ul>\1</ul>', formatted_text, flags=re.DOTALL)
-
-    # Clean up any extra <br> tags around list items
     formatted_text = formatted_text.replace('<br><li>', '<li>').replace('</li><br>', '</li>')
-
     return formatted_text
 
-# Flask application setup
-app = Flask(__name__)
-
+# Function to check if a value is null and provide a default message
 def check_if_null(value):
     return value if value else "Provide examples of records to search"
 
+# Function to build prompt with conversation history
+def build_prompt_with_history(question):
+    if 'conversation_history' not in session:
+        session['conversation_history'] = []
+    
+    # Append the new question to conversation history
+    session['conversation_history'].append(("user", question))
+    
+    # Build the prompt with the conversation history as a clear dialogue
+    # Get the current date and format it
+    current_date = datetime.now().strftime("%B %d, %Y")
+    prompt_messages = [
+        {"role": "system", "content": f"You are a helpful AI assistant. Today's date is {current_date}. You are an expert in querying SQL Databases."}
+    ]
+    
+    # Append each message in conversation history as user/assistant format
+    for role, content in session['conversation_history']:
+        if role == "user":
+            prompt_messages.append({"role": "user", "content": content})
+        elif role == "ai":
+            prompt_messages.append({"role": "assistant", "content": content})
+    
+    return prompt_messages
+
+# Function to extract axis labels based on database query results
+def extract_axes_labels(result):
+    """
+    Extracts x and y axis labels based on the column names from the Result object.
+    """
+    column_names = list(result.keys())  # Convert to list to make it subscriptable
+    x_label = column_names[0] if len(column_names) > 0 else "Categories"
+    y_label = column_names[1] if len(column_names) > 1 else "Values"
+    return x_label, y_label
 
 @app.route("/")
 def index():
-    # Render the index.html template
     return render_template("index.html")
 
-# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 
 @app.route("/ask", methods=["POST"])
@@ -130,19 +148,71 @@ def ask():
     try:
         query = check_if_null(request.json.get("message"))
         
-        # Generate the response from OpenAI
-        response = sqldb_agent.invoke(final_prompt.format(question=query))
+        # Generate prompt with conversation history
+        final_prompt = build_prompt_with_history(query)
         
-        # Extract the final answer and format it as HTML
-        final_answer = response.get("output") if isinstance(response, dict) else response
+        # Generate response with error handling for parsing issues
+        try:
+            response = sqldb_agent.invoke(final_prompt)
+            final_answer = response.get("output") if isinstance(response, dict) else response
+            # Append the response to conversation history
+            session['conversation_history'].append(("ai", final_answer))
+        except ValueError as parse_error:
+            logging.error("Parsing error encountered: %s", parse_error)
+            final_answer = "I'm sorry, there was an issue processing your request. Could you try rephrasing your question?"
+            session['conversation_history'].append(("ai", final_answer))
+
         formatted_answer = format_response_to_html(final_answer)
 
-        # Include the last SQL statement in the response
-        return jsonify({"summary": formatted_answer, "sql_statement": last_sql_statement, "response": []})
+        # Check if the query is asking for a visualization
+        if any(keyword in query.lower() for keyword in ["chart", "graph", "visual", "plot", "pie"]):
+            with db_engine.connect() as connection:
+                query_result = connection.execute(text(last_sql_statement))
+                data = query_result.fetchall()
+
+            # Get dynamic x and y labels based on the column names in the result
+            x_label, y_label = extract_axes_labels(query_result)
+            
+            # Extract categories and values from data
+            categories = [row[0] for row in data]
+            values = [row[1] for row in data]
+
+            if "pie" in query.lower():
+                plt.figure(figsize=(8, 8))
+                plt.pie(values, labels=categories, autopct='%1.1f%%', startangle=140)
+                plt.title('Query Result Visualization (Pie Chart)')
+            else:
+                plt.figure(figsize=(10, 6))
+                plt.bar(categories, values)
+                plt.xlabel(x_label)
+                plt.ylabel(y_label)
+                plt.title('Query Result Visualization (Bar Chart)')
+
+            img = BytesIO()
+            plt.savefig(img, format="png")
+            img.seek(0)
+            img_base64 = base64.b64encode(img.getvalue()).decode()
+
+            return jsonify({
+                "summary": formatted_answer,
+                "sql_statement": last_sql_statement,
+                "chart_image": img_base64
+            })
+        
+        return jsonify({
+            "summary": formatted_answer,
+            "sql_statement": last_sql_statement,
+            "chart_image": ""
+        })
     
     except Exception as e:
         logging.error("An error occurred: %s", e, exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+@app.route("/reset", methods=["POST"])
+def reset_conversation():
+    session.pop('conversation_history', None)
+    return jsonify({"message": "Conversation history has been reset."})
 
 if __name__ == "__main__":
     app.run(debug=True)
